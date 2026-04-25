@@ -1,0 +1,19 @@
+name = "xylocopa-telemetry"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+# Create the KV namespace before deploying:
+#   npx wrangler kv namespace create RATE_LIMIT_KV
+# Then paste the printed `id = "..."` value below in place of the placeholder.
+[[kv_namespaces]]
+binding = "RATE_LIMIT_KV"
+id = "f64a6419154341cc9ef5f2d9cb7d7798"
+
+# D1 database (primary event storage). Created via:
+#   npx wrangler d1 create xylocopa-telemetry
+# Schema applied via:
+#   npx wrangler d1 execute xylocopa-telemetry --remote --file=schema.sql
+[[d1_databases]]
+binding = "DB"
+database_name = "xylocopa-telemetry"
+database_id = "2c9f16d2-89d5-428f-a172-8583c814a8da"
