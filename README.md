@@ -71,7 +71,15 @@ Xylocopa client  ─▶  POST /v1/event  ─▶  Cloudflare Worker  ─▶  D1 (
      -d '{"event":"install_complete","install_id":"550e8400-e29b-41d4-a716-446655440000","version":"0.6.1","platform":"linux","timestamp":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}'
    ```
 
-8. **Deploy**
+8. **(Optional) Discord notifications** — real-time new-install pings + a weekly digest (Monday 09:00 UTC):
+
+   ```bash
+   npx wrangler secret put DISCORD_WEBHOOK
+   ```
+
+   Paste a Discord webhook URL. If unset, the Worker silently no-ops both the inline notification and the cron handler.
+
+9. **Deploy**
 
    ```bash
    npx wrangler deploy

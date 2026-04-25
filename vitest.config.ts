@@ -8,6 +8,9 @@ export default defineConfig({
       miniflare: {
         kvNamespaces: ["RATE_LIMIT_KV"],
         d1Databases: ["DB"],
+        bindings: {
+          DISCORD_WEBHOOK: "https://discord.example/webhook",
+        },
       },
     }),
   ],

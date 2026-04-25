@@ -1,11 +1,12 @@
 /// <reference path="../node_modules/@cloudflare/vitest-pool-workers/types/cloudflare-test.d.ts" />
-import { describe, it, expect, beforeAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import { env, createExecutionContext, waitOnExecutionContext } from "cloudflare:test";
 import worker from "./index";
 
 interface Env {
   RATE_LIMIT_KV: KVNamespace;
   DB: D1Database;
+  DISCORD_WEBHOOK?: string;
 }
 
 const SCHEMA_SQL = `
@@ -72,6 +73,9 @@ beforeEach(async () => {
   for (const k of list.keys) {
     await e.RATE_LIMIT_KV.delete(k.name);
   }
+  // Default fetch stub for Discord notifications. Individual tests can
+  // reset or inspect this via vi.mocked(...).
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 204 })));
 });
 
 describe("GET /health", () => {
@@ -219,6 +223,50 @@ describe("OPTIONS /v1/event", () => {
     expect(resp.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect(resp.headers.get("Access-Control-Allow-Methods")).toContain("POST");
     expect(resp.headers.get("Access-Control-Allow-Headers")).toContain("Content-Type");
+  });
+});
+
+describe("Real-time new-install notification", () => {
+  it("posts to Discord on first-ever event from an install_id", async () => {
+    const resp = await dispatch(
+      makeRequest("/v1/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(validPayload()),
+      }),
+    );
+    expect(resp.status).toBe(200);
+
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://discord.example/webhook");
+    const body = JSON.parse((init as RequestInit).body as string);
+    expect(body.content).toMatch(/New install/);
+    expect(body.content).toMatch(/550e8400/); // short install_id
+  });
+
+  it("does NOT post on subsequent events from same install_id", async () => {
+    // First event — triggers notification
+    await dispatch(
+      makeRequest("/v1/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(validPayload()),
+      }),
+    );
+    const fetchMock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+    fetchMock.mockClear();
+
+    // Second event — should be silent
+    await dispatch(
+      makeRequest("/v1/event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(validPayload()),
+      }),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(0);
   });
 });
 

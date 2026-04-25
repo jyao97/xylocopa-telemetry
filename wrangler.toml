@@ -17,3 +17,9 @@ id = "f64a6419154341cc9ef5f2d9cb7d7798"
 binding = "DB"
 database_name = "xylocopa-telemetry"
 database_id = "2c9f16d2-89d5-428f-a172-8583c814a8da"
+
+# Weekly Discord digest — runs Monday 09:00 UTC.
+# Requires DISCORD_WEBHOOK secret: `npx wrangler secret put DISCORD_WEBHOOK`
+# If the secret isn't set, the scheduled handler silently no-ops.
+[triggers]
+crons = ["0 9 * * MON"]

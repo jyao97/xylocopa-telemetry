@@ -18,6 +18,9 @@ const WORKER_VERSION = "0.1.0";
 export interface Env {
   RATE_LIMIT_KV: KVNamespace;
   DB: D1Database;
+  // Optional — when set, the Worker posts a Discord message on first-ever
+  // event from a new install_id, and a weekly digest on the cron trigger.
+  DISCORD_WEBHOOK?: string;
 }
 
 const ALLOWED_EVENTS = new Set([
@@ -151,6 +154,103 @@ async function insertEvent(db: D1Database, evt: TelemetryEvent): Promise<void> {
     .run();
 }
 
+async function isFirstEvent(db: D1Database, installId: string): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT COUNT(*) AS c FROM events WHERE install_id = ?")
+    .bind(installId)
+    .first<{ c: number }>();
+  return (row?.c ?? 0) === 0;
+}
+
+async function postDiscord(webhookUrl: string, content: string): Promise<void> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+  try {
+    const resp = await fetch(webhookUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": `Xylocopa-Telemetry-Worker/${WORKER_VERSION}`,
+      },
+      body: JSON.stringify({ content }),
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      console.warn(`discord_non_2xx status=${resp.status}`);
+    }
+  } catch (err) {
+    const name = err instanceof Error ? err.name : "unknown";
+    console.warn(`discord_fetch_error type=${name}`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function newInstallMessage(evt: TelemetryEvent): string {
+  const shortId = evt.install_id.slice(0, 8);
+  return `🆕 New install: \`${shortId}\` · ${evt.platform} · v${evt.version}`;
+}
+
+interface WeeklyStats {
+  new_this_week: number;
+  active_this_week: number;
+  all_time: number;
+  platforms: Array<{ platform: string; count: number }>;
+}
+
+async function computeWeeklyStats(db: D1Database): Promise<WeeklyStats> {
+  const newThisWeek = await db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM (
+         SELECT install_id, MIN(received_at) AS first_seen
+         FROM events GROUP BY install_id
+         HAVING datetime(first_seen) >= datetime('now','-7 days')
+       )`
+    )
+    .first<{ c: number }>();
+
+  const active = await db
+    .prepare(
+      `SELECT COUNT(DISTINCT install_id) AS c FROM events
+       WHERE datetime(received_at) >= datetime('now','-7 days')`
+    )
+    .first<{ c: number }>();
+
+  const all = await db
+    .prepare("SELECT COUNT(DISTINCT install_id) AS c FROM events")
+    .first<{ c: number }>();
+
+  const platforms = await db
+    .prepare(
+      `SELECT platform, COUNT(DISTINCT install_id) AS c FROM events
+       WHERE datetime(received_at) >= datetime('now','-7 days')
+       GROUP BY platform ORDER BY c DESC`
+    )
+    .all<{ platform: string; c: number }>();
+
+  return {
+    new_this_week: newThisWeek?.c ?? 0,
+    active_this_week: active?.c ?? 0,
+    all_time: all?.c ?? 0,
+    platforms: (platforms.results ?? []).map((r) => ({ platform: r.platform, count: r.c })),
+  };
+}
+
+function formatWeeklyDigest(stats: WeeklyStats): string {
+  const date = new Date().toISOString().slice(0, 10);
+  const platLine =
+    stats.platforms.length > 0
+      ? stats.platforms.map((p) => `${p.platform} ${p.count}`).join(", ")
+      : "—";
+  return [
+    `📊 **Xylocopa Weekly** · ${date}`,
+    `• New this week: **${stats.new_this_week}**`,
+    `• Active this week: **${stats.active_this_week}**`,
+    `• All-time unique installs: **${stats.all_time}**`,
+    `• Platforms (active): ${platLine}`,
+  ].join("\n");
+}
+
 async function handleEvent(request: Request, env: Env): Promise<Response> {
   const cl = request.headers.get("content-length");
   if (cl !== null) {
@@ -188,12 +288,26 @@ async function handleEvent(request: Request, env: Env): Promise<Response> {
     return errorResponse("rate_limited", 429);
   }
 
+  let firstEver = false;
   try {
+    if (env.DISCORD_WEBHOOK) {
+      firstEver = await isFirstEvent(env.DB, evt.install_id);
+    }
     await insertEvent(env.DB, evt);
   } catch (err) {
     const name = err instanceof Error ? err.name : "unknown";
     console.warn(`d1_insert_error type=${name}`);
     return errorResponse("internal", 500, "d1_insert");
+  }
+
+  // Fire-and-forget new-install notification. Not awaited — must not block the
+  // response or leak Discord errors to the client.
+  if (firstEver && env.DISCORD_WEBHOOK) {
+    const msg = newInstallMessage(evt);
+    const url = env.DISCORD_WEBHOOK;
+    // Use waitUntil via ExecutionContext if available; otherwise just drop.
+    // CF runtime ignores rejected/slow promises once the response is sent.
+    postDiscord(url, msg).catch(() => {});
   }
 
   return jsonResponse({ ok: true }, 200);
@@ -224,6 +338,26 @@ const handler: ExportedHandler<Env> = {
     }
 
     return errorResponse("not_found", 404);
+  },
+
+  // Weekly digest — triggered by cron in wrangler.toml.
+  async scheduled(_event, env, ctx): Promise<void> {
+    if (!env.DISCORD_WEBHOOK) {
+      console.warn("scheduled: DISCORD_WEBHOOK not configured; skipping");
+      return;
+    }
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const stats = await computeWeeklyStats(env.DB);
+          const msg = formatWeeklyDigest(stats);
+          await postDiscord(env.DISCORD_WEBHOOK!, msg);
+        } catch (err) {
+          const name = err instanceof Error ? err.name : "unknown";
+          console.warn(`scheduled_error type=${name}`);
+        }
+      })()
+    );
   },
 };
 
